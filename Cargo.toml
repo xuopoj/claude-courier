@@ -7,6 +7,10 @@ edition = "2024"
 name = "claude-courier"
 path = "src/main.rs"
 
+[lib]
+name = "claude_courier"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
