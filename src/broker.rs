@@ -7,7 +7,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,14 +16,14 @@ use tokio::sync::Mutex;
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
 
 struct State {
-    queue: Mutex<VecDeque<Bytes>>,
+    slot: Mutex<Option<Bytes>>,
     publish_key: String,
     consume_key: String,
 }
 
 pub async fn run(cfg: BrokerConfig) -> Result<()> {
     let state = Arc::new(State {
-        queue: Mutex::new(VecDeque::new()),
+        slot: Mutex::new(None),
         publish_key: cfg.publish_key.clone(),
         consume_key: cfg.consume_key.clone(),
     });
@@ -72,7 +71,7 @@ async fn handle(state: Arc<State>, req: Request<Incoming>, peer: String) -> Resp
                         if bytes.is_empty() {
                             reply(StatusCode::BAD_REQUEST, "empty body")
                         } else {
-                            state.queue.lock().await.push_back(bytes);
+                            *state.slot.lock().await = Some(bytes);
                             reply(StatusCode::ACCEPTED, "ok")
                         }
                     }
@@ -87,13 +86,13 @@ async fn handle(state: Arc<State>, req: Request<Incoming>, peer: String) -> Resp
             if provided != state.consume_key {
                 reply(StatusCode::UNAUTHORIZED, "unauthorized")
             } else {
-                match state.queue.lock().await.pop_front() {
+                match state.slot.lock().await.clone() {
                     Some(bytes) => Response::builder()
                         .status(StatusCode::OK)
                         .header("content-type", "application/octet-stream")
                         .body(Full::new(bytes).boxed())
                         .unwrap(),
-                    None => reply(StatusCode::GONE, "no messages pending"),
+                    None => reply(StatusCode::GONE, "no token published yet"),
                 }
             }
         }
