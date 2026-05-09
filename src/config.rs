@@ -22,6 +22,16 @@ pub struct ConsumerConfig {
     pub consume_key: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProxyConfig {
+    pub listen: String,
+    pub upstream: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_key: Option<String>,
+}
+
 fn config_dir() -> PathBuf {
     dirs::config_dir()
         .expect("no config dir")
@@ -36,6 +46,9 @@ pub fn broker_path() -> PathBuf {
 }
 pub fn consumer_path() -> PathBuf {
     config_dir().join("consumer.toml")
+}
+pub fn proxy_path() -> PathBuf {
+    config_dir().join("proxy.toml")
 }
 
 fn write_secure(path: &PathBuf, contents: &str) -> Result<()> {
@@ -58,6 +71,9 @@ pub fn save_broker(cfg: &BrokerConfig) -> Result<()> {
 pub fn save_consumer(cfg: &ConsumerConfig) -> Result<()> {
     write_secure(&consumer_path(), &toml::to_string_pretty(cfg)?)
 }
+pub fn save_proxy(cfg: &ProxyConfig) -> Result<()> {
+    write_secure(&proxy_path(), &toml::to_string_pretty(cfg)?)
+}
 
 pub fn load_publisher() -> Result<PublisherConfig> {
     let p = publisher_path();
@@ -74,6 +90,11 @@ pub fn load_consumer() -> Result<ConsumerConfig> {
     let s = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
     toml::from_str(&s).context("parse consumer.toml")
 }
+pub fn load_proxy() -> Result<ProxyConfig> {
+    let p = proxy_path();
+    let s = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+    toml::from_str(&s).context("parse proxy.toml")
+}
 
 pub fn resolve_publisher(
     broker_url: Option<String>,
@@ -87,6 +108,23 @@ pub fn resolve_publisher(
         publish_key: publish_key
             .or_else(|| f.as_ref().map(|c| c.publish_key.clone()))
             .context("no publish_key: provide --key or run `publish-configure` first")?,
+    })
+}
+
+pub fn resolve_proxy(
+    listen: Option<String>,
+    upstream: Option<String>,
+) -> Result<ProxyConfig> {
+    let f = load_proxy().ok();
+    Ok(ProxyConfig {
+        listen: listen
+            .or_else(|| f.as_ref().map(|c| c.listen.clone()))
+            .unwrap_or_else(|| "127.0.0.1:8787".into()),
+        upstream: upstream
+            .or_else(|| f.as_ref().map(|c| c.upstream.clone()))
+            .context("no upstream: provide --upstream or run `proxy-configure` first")?,
+        inject_api_key: f.as_ref().and_then(|c| c.inject_api_key.clone()),
+        listen_key: f.as_ref().and_then(|c| c.listen_key.clone()),
     })
 }
 
