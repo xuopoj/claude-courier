@@ -11,9 +11,14 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, std::io::Error>;
+
+fn key_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.ct_eq(b).into()
+}
 
 pub fn resolve_upstream(spec: &str) -> Result<reqwest::Url> {
     let url = match spec.to_ascii_lowercase().as_str() {
@@ -92,7 +97,7 @@ async fn handle(
             .get("x-api-key")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if provided != expected {
+        if !key_eq_bytes(provided.as_bytes(), expected.as_bytes()) {
             log(&format!(
                 "{} {} {} -> 401 unauthorized",
                 peer, method, path_and_query
@@ -171,7 +176,7 @@ async fn forward(
             && state
                 .listen_key
                 .as_deref()
-                .map(|k| value.as_bytes() == k.as_bytes())
+                .map(|k| key_eq_bytes(value.as_bytes(), k.as_bytes()))
                 .unwrap_or(false)
         {
             continue;

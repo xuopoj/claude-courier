@@ -161,7 +161,7 @@ Features:
 
 - **The broker holds OAuth tokens.** Run it behind TLS with a real cert. The Dockerfile binds the broker to `127.0.0.1:3007` inside the container, expecting a reverse proxy (nginx/Caddy) to terminate TLS in front of it.
 - **Use separate publish/consume keys.** A consumer machine should not be able to overwrite the slot.
-- **Keys are 32-byte hex (`openssl rand -hex 32`)** in the suggested setup, compared with constant-time-ish equality. The current implementation uses byte equality which leaks timing information; for a personal-use broker on a fast network this is fine, but a treasure-trove deployment should switch to a constant-time compare.
+- **Keys are 32-byte hex (`openssl rand -hex 32`)** in the suggested setup, compared with `subtle::ConstantTimeEq` so a remote attacker cannot recover key bytes via response-time side-channels.
 - **Storage is in-memory.** Restarting the broker means the latest envelope is gone until the publisher re-publishes. Acceptable for a token-sync use case.
 - **The Docker image contains no secrets.** Keys are passed at `docker run` time via `--publish-key` / `--consume-key`. The image can stay public.
 

@@ -28,6 +28,7 @@ dirs = "5"
 sha2 = "0.10"
 hex = "0.4"
 notify = "6"
+subtle = "2"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

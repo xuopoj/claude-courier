@@ -10,8 +10,16 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+
+// `bool::from(a.ct_eq(b))`-shaped helper. Constant-time on the secret bytes.
+// Length mismatch still short-circuits, but length is not the secret here
+// (publish_key and consume_key have known fixed length on the server).
+fn key_eq(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
 
@@ -62,7 +70,7 @@ async fn handle(state: Arc<State>, req: Request<Incoming>, peer: String) -> Resp
 
     let resp = match (&method, path.as_str()) {
         (&Method::POST, "/publish") => {
-            if provided != state.publish_key {
+            if !key_eq(&provided, &state.publish_key) {
                 reply(StatusCode::UNAUTHORIZED, "unauthorized")
             } else {
                 match req.into_body().collect().await {
@@ -83,7 +91,7 @@ async fn handle(state: Arc<State>, req: Request<Incoming>, peer: String) -> Resp
             }
         }
         (&Method::GET, "/consume") => {
-            if provided != state.consume_key {
+            if !key_eq(&provided, &state.consume_key) {
                 reply(StatusCode::UNAUTHORIZED, "unauthorized")
             } else {
                 match state.slot.lock().await.clone() {
