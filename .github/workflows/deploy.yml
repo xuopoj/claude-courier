@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-broker
+  group: deploy
   cancel-in-progress: false
 
 env:
@@ -150,7 +150,31 @@ jobs:
             sleep 1
           done
 
-          docker ps --filter name=claude-courier-broker --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          echo "stopping previous proxy container (if any)"
+          docker rm -f claude-courier-proxy 2>/dev/null || true
+
+          echo "starting proxy container"
+          docker run -d \
+            --name claude-courier-proxy \
+            --restart unless-stopped \
+            -p 127.0.0.1:3008:3008 \
+            "$IMAGE_TAG" \
+            proxy \
+              --listen 0.0.0.0:3008 \
+              --upstream anthropic
+
+          echo "waiting for proxy to respond"
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:3008/ || echo 000)
+            # Any 4xx/2xx proves the proxy is serving (Anthropic returns 4xx for `/`).
+            if [ "${code#2}" != "$code" ] || [ "${code#4}" != "$code" ]; then
+              echo "proxy responding (HTTP $code)"
+              break
+            fi
+            sleep 1
+          done
+
+          docker ps --filter name=claude-courier --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
           REMOTE
           } > "$script"
 
