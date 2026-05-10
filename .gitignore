@@ -3,3 +3,8 @@ target/
 .DS_Store
 .env
 .env.local
+# SSH / TLS keys must never enter the repo
+*.pem
+*.key
+id_rsa
+id_ed25519
