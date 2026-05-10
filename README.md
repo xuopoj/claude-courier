@@ -39,7 +39,7 @@ cargo install --path .
 
 ### 1. Run the broker on a server you control
 
-The broker is a Docker image at `ghcr.io/xuopoj/claude-courier:latest`. Run it behind a TLS reverse proxy (nginx + Let's Encrypt is fine — see [`deploy/`](deploy/)):
+The broker is a Docker image at `ghcr.io/xuopoj/claude-courier:latest`. Run it behind a TLS reverse proxy (nginx + Let's Encrypt is fine):
 
 ```sh
 docker run -d \
@@ -180,7 +180,7 @@ src/
   deploy.yml    # tag push -> build image, push to GHCR, SSH to server, roll container
   release.yml   # tag push -> matrix-build 3 platforms, attach tarballs to GitHub Release
 deploy/
-  broker.aishipbox.com.nginx.conf   # example nginx site config
+  com.aishipbox.claude-courier-publish.plist  # macOS launchd agent for auto-republish
 install.sh      # POSIX-sh installer that picks the right release tarball
 Dockerfile      # multi-stage rust:bookworm builder + debian-slim runtime
 ```

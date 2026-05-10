@@ -40,7 +40,7 @@ Two GitHub Actions workflows, both **tag-triggered only** (`v*` push):
 
 Routine commits to `main` do **not** deploy. Cut a release with `git tag v0.x.y && git push --tags`. Both workflows fire in parallel.
 
-The Dockerfile is multi-stage rust:bookworm → debian-slim, runs as a non-root `courier` user, exposes 3007. Default CMD is `broker`. The broker binds to `0.0.0.0:3007` inside the container and is published to `127.0.0.1:3007` on the host — TLS terminates in front via nginx (see `deploy/broker.aishipbox.com.nginx.conf`).
+The Dockerfile is multi-stage rust:bookworm → debian-slim, runs as a non-root `courier` user, exposes 3007. Default CMD is `broker`. The broker binds to `0.0.0.0:3007` inside the container and is published to `127.0.0.1:3007` on the host — TLS terminates in front via nginx (configured directly on the server, not vendored in this repo).
 
 `install.sh` is the consumer-side installer; it calls the GitHub `/releases/latest` redirect (or honors `VERSION=v...`), picks the matching tarball by detected `uname -s/-m`, verifies sha256, and installs to `/usr/local/bin` (sudo if needed) or `~/.local/bin` (`NO_SUDO=1` or fallback).
 
