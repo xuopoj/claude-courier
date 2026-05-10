@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aishipbox.claude-courier-publish</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/claude-courier</string>
+        <string>publish</string>
+    </array>
+
+    <!-- Run at load and every 30 min thereafter. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- Keep logs around for debugging. Inspect with:
+           tail -f ~/Library/Logs/claude-courier-publish.log -->
+    <key>StandardOutPath</key>
+    <string>/Users/sean/Library/Logs/claude-courier-publish.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/sean/Library/Logs/claude-courier-publish.log</string>
+
+    <!-- launchd wakes the Mac if it's asleep when the timer fires.
+         Set to false if you'd rather skip publishes during sleep. -->
+    <key>StartCalendarInterval</key>
+    <dict/>
+
+    <!-- Don't relaunch on crash; the next interval will retry. -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
