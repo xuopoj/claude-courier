@@ -35,6 +35,10 @@ enum Cmd {
     Broker {
         #[arg(long)]
         bind: Option<String>,
+        #[arg(long)]
+        publish_key: Option<String>,
+        #[arg(long)]
+        consume_key: Option<String>,
     },
     /// Save broker defaults (bind, publish key, consume key).
     BrokerConfigure {
@@ -106,11 +110,23 @@ async fn main() -> Result<()> {
             Ok(())
         }
 
-        Cmd::Broker { bind } => {
-            let mut cfg = load_broker().context("no broker.toml: run `broker-configure` first")?;
-            if let Some(b) = bind {
-                cfg.bind = b;
-            }
+        Cmd::Broker {
+            bind,
+            publish_key,
+            consume_key,
+        } => {
+            let existing = load_broker().ok();
+            let cfg = BrokerConfig {
+                bind: bind
+                    .or_else(|| existing.as_ref().map(|c| c.bind.clone()))
+                    .unwrap_or_else(|| "127.0.0.1:3007".into()),
+                publish_key: publish_key
+                    .or_else(|| existing.as_ref().map(|c| c.publish_key.clone()))
+                    .context("--publish-key required (or run `broker-configure` first)")?,
+                consume_key: consume_key
+                    .or_else(|| existing.as_ref().map(|c| c.consume_key.clone()))
+                    .context("--consume-key required (or run `broker-configure` first)")?,
+            };
             broker::run(cfg).await
         }
 
