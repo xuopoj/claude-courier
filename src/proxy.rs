@@ -192,6 +192,9 @@ async fn forward(
     upstream_req = upstream_req.header("host", &host_str);
 
     if let Some(key) = &state.inject_api_key {
+        // WARNING: never enable inject_api_key without listen_key. An open relay
+        // that injects the operator's key lets anyone drain the operator's
+        // upstream credits.
         if !forwarded_auth && !forwarded_xkey {
             // Anthropic uses x-api-key; OpenAI/Gemini use Authorization. Default
             // to x-api-key when upstream is anthropic, else Authorization Bearer.
