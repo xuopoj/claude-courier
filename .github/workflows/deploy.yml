@@ -1,0 +1,139 @@
+# Build the broker image, push to GHCR, then SSH into the server and roll the
+# container. Triggered on every push to main.
+#
+# Required repository secrets:
+#   SSH_HOST            - server hostname or IP
+#   SSH_USER            - SSH user (must be in the docker group)
+#   SSH_PRIVATE_KEY     - private key matching an authorized_keys entry on the server
+#   SSH_PORT            - (optional) SSH port; defaults to 22
+#   SSH_KNOWN_HOSTS     - output of `ssh-keyscan -H <host>` for the server, used to pin the host key
+#   BROKER_PUBLISH_KEY  - x-api-key the publisher must send
+#   BROKER_CONSUME_KEY  - x-api-key the consumer must send
+#
+# GHCR push authenticates with the built-in GITHUB_TOKEN.
+
+name: deploy broker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-broker
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/claude-courier
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "image_tag=${{ env.IMAGE }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Roll container on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          BROKER_PUBLISH_KEY: ${{ secrets.BROKER_PUBLISH_KEY }}
+          BROKER_CONSUME_KEY: ${{ secrets.BROKER_CONSUME_KEY }}
+        run: |
+          set -euo pipefail
+          PORT="${SSH_PORT:-22}"
+
+          # Build the remote script on the runner: env values are written to a
+          # tmpfile via printf so any shell-special chars in the keys survive.
+          # The script is then piped over SSH and read from stdin.
+          script=$(mktemp)
+          trap 'rm -f "$script"' EXIT
+
+          {
+            printf 'set -euo pipefail\n'
+            printf 'IMAGE_TAG=%q\n'           "$IMAGE_TAG"
+            printf 'BROKER_PUBLISH_KEY=%q\n'  "$BROKER_PUBLISH_KEY"
+            printf 'BROKER_CONSUME_KEY=%q\n'  "$BROKER_CONSUME_KEY"
+            cat <<'REMOTE'
+
+          echo "pulling $IMAGE_TAG"
+          docker pull "$IMAGE_TAG"
+
+          echo "stopping previous container (if any)"
+          docker rm -f claude-courier-broker 2>/dev/null || true
+
+          echo "starting new container"
+          docker run -d \
+            --name claude-courier-broker \
+            --restart unless-stopped \
+            -p 127.0.0.1:3007:3007 \
+            "$IMAGE_TAG" \
+            broker \
+              --bind 0.0.0.0:3007 \
+              --publish-key "$BROKER_PUBLISH_KEY" \
+              --consume-key "$BROKER_CONSUME_KEY"
+
+          echo "waiting for broker to respond"
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:3007/ || echo 000)
+            # 404 is expected — / has no route, but a 4xx proves the broker is serving.
+            if [ "$code" = "404" ] || [ "${code#2}" != "$code" ] || [ "${code#4}" != "$code" ]; then
+              echo "broker responding (HTTP $code)"
+              break
+            fi
+            sleep 1
+          done
+
+          docker ps --filter name=claude-courier-broker --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          REMOTE
+          } > "$script"
+
+          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" 'bash -s' < "$script"
