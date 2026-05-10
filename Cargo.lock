@@ -202,6 +202,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures",
+ "getrandom 0.2.17",
  "hex",
  "http-body-util",
  "hyper",

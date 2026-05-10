@@ -1,0 +1,116 @@
+# Roll the router container on the server. Manual trigger only — the router
+# is independent from the broker so you can update it on a different cadence.
+# Optional `tag` input pins to a specific image tag; otherwise pulls :latest.
+#
+# Required repository secrets:
+#   SSH_HOST, SSH_USER, SSH_PRIVATE_KEY, SSH_PORT? — same as deploy.yml.
+#
+# Server prerequisite (one-time, by hand):
+#   sudo mkdir -p /etc/claude-courier
+#   sudo chown 10001:10001 /etc/claude-courier   # uid 10001 is `courier` inside the container
+#   sudo chmod 700 /etc/claude-courier
+#   # then scp router.toml from your local machine:
+#   scp ~/Library/Application\ Support/claude-courier/router.toml \
+#       <user>@<host>:/tmp/router.toml
+#   sudo install -m 0600 -o 10001 -g 10001 /tmp/router.toml /etc/claude-courier/router.toml
+#   sudo rm /tmp/router.toml
+#
+# To rotate keys later:
+#   1. on your Mac: `claude-courier router-key add <name>` (or revoke/rm)
+#   2. scp the updated file to /tmp/router.toml on the server
+#   3. sudo install -m 0600 -o 10001 -g 10001 /tmp/router.toml /etc/claude-courier/router.toml
+#   4. ssh and `docker restart claude-courier-router`  (or re-run this workflow)
+#
+# Same trust-on-first-use SSH posture as deploy.yml.
+
+name: deploy router
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+
+concurrency:
+  group: deploy-router
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/claude-courier
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          touch ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Roll router container on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          IMAGE_TAG: ${{ env.IMAGE }}:${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          PORT="${SSH_PORT:-22}"
+
+          script=$(mktemp)
+          trap 'rm -f "$script"' EXIT
+
+          {
+            printf 'set -euo pipefail\n'
+            printf 'IMAGE_TAG=%q\n' "$IMAGE_TAG"
+            cat <<'REMOTE'
+
+          if [ ! -f /etc/claude-courier/router.toml ]; then
+            echo "ERROR: /etc/claude-courier/router.toml missing on server."
+            echo "       scp it manually from your machine first; see the README."
+            exit 1
+          fi
+
+          echo "pulling $IMAGE_TAG"
+          docker pull "$IMAGE_TAG"
+
+          echo "stopping previous router container (if any)"
+          docker rm -f claude-courier-router 2>/dev/null || true
+
+          echo "starting new router container"
+          # XDG_CONFIG_HOME=/etc + dirs::config_dir() => /etc/claude-courier,
+          # so the mounted host file at /etc/claude-courier/router.toml lines
+          # up with where load_router() looks inside the container.
+          docker run -d \
+            --name claude-courier-router \
+            --restart unless-stopped \
+            -p 127.0.0.1:3008:3008 \
+            -e XDG_CONFIG_HOME=/etc \
+            -v /etc/claude-courier/router.toml:/etc/claude-courier/router.toml:ro \
+            "$IMAGE_TAG" \
+            router --listen 0.0.0.0:3008
+
+          echo "waiting for router to respond"
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:3008/ || echo 000)
+            # 401 is expected — / requires a valid x-api-key — but proves the router is serving.
+            if [ "$code" = "401" ] || [ "${code#2}" != "$code" ] || [ "${code#4}" != "$code" ]; then
+              echo "router responding (HTTP $code)"
+              break
+            fi
+            sleep 1
+          done
+
+          docker ps --filter name=claude-courier-router --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+          REMOTE
+          } > "$script"
+
+          ssh -p "$PORT" -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" 'bash -s' < "$script"

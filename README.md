@@ -2,11 +2,12 @@
 
 Sync Claude Code OAuth credentials between machines through a self-hosted broker.
 
-A single binary with four roles:
+A single binary with five roles:
 
 - **publisher** — reads Claude credentials from macOS Keychain on a logged-in Mac and publishes them to a broker.
 - **broker** — a small HTTP server that holds the latest published envelope.
 - **consumer** — pulls the envelope from the broker and applies it to `~/.claude/.credentials.json` + `~/.claude.json` on Linux/WSL/another Mac.
+- **router** — pulls fresh OAuth tokens from the broker and serves them as `Authorization: Bearer` to clients. Lets any tool that supports `ANTHROPIC_BASE_URL` (Claude Code, Cursor, etc.) use your Pro/Max subscription via a local API key, without ever touching the OAuth token directly. Per-consumer keys are named, revocable, and audit-logged.
 - **proxy** — an unrelated bonus: an HTTP reverse proxy with built-in presets for `anthropic`, `openai`, and `gemini`. Useful for routing local LLM clients through a single endpoint.
 
 Why exist: Claude Code's login flow ties your tokens to one machine's Keychain. If you also want Claude Code working on a Linux server, WSL box, or second Mac, you'd normally re-authenticate there. claude-courier syncs the tokens once and keeps the secondary machines current as your access token rotates.
@@ -139,6 +140,105 @@ sudo systemctl enable --now claude-courier-consume.timer
 
 Storage is in-memory only. A broker restart drops the slot and you'll need to re-publish.
 
+## Router (OAuth token injection)
+
+The `router` role sits between Claude Code (or any Anthropic-compatible client) and `api.anthropic.com`. It pulls a fresh OAuth access token from the broker on demand, caches it until ~5 min before expiry, and injects `Authorization: Bearer <token>` into outbound requests. Clients authenticate to the router with a named, revocable per-consumer key — they never see the OAuth token.
+
+### Configure once
+
+```sh
+claude-courier router-configure \
+  --broker https://broker.example.com \
+  --consume-key <consume-key>
+```
+
+This writes `~/.config/claude-courier/router.toml` (or `~/Library/Application Support/...` on macOS) with mode `0600`. The file gets a `[[keys]]` table array as you provision keys.
+
+### Provision per-consumer keys
+
+```sh
+claude-courier router-key add alice          # generates 32 random bytes, prints once
+claude-courier router-key list                # names + status only, never the secrets
+claude-courier router-key revoke alice        # disabled = true (kept for audit)
+claude-courier router-key rm alice            # actually remove the entry
+```
+
+Each `add` prints the key once with a copy-pasteable env block. Save it then — there's no way to recover it from the file (well, there is — `cat router.toml` — but treat it like an SSH private key).
+
+### Run the router
+
+```sh
+claude-courier router
+# router listening on 127.0.0.1:8788 -> https://api.anthropic.com (1 key(s) enabled, token from https://broker.example.com)
+```
+
+The router refuses to start with zero enabled keys, so an empty config can't accidentally become an open relay.
+
+### Use it from a client
+
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8788
+export ANTHROPIC_API_KEY=<the-key-router-key-add-printed>
+claude
+```
+
+The client sends its inert local key as `x-api-key`; the router validates it (constant-time), strips it, replaces it with the upstream `Authorization: Bearer <oauth>` and `anthropic-beta: oauth-2025-04-20`, then streams the response back. Logs include `key=<name>` per request so you can correlate traffic with a named consumer and revoke just that one if it leaks.
+
+### Deploying the router publicly (optional)
+
+The router can run on the same server as the broker. Two pieces are required:
+
+**1. Mount `router.toml` on the host** (one-time setup; rotate keys later by editing the file and restarting the container):
+
+```sh
+sudo mkdir -p /etc/claude-courier
+sudo chown 10001:10001 /etc/claude-courier   # uid 10001 = `courier` inside the image
+sudo chmod 700 /etc/claude-courier
+
+# from your Mac:
+scp ~/Library/Application\ Support/claude-courier/router.toml \
+    user@server:/tmp/router.toml
+
+# back on the server:
+sudo install -m 0600 -o 10001 -g 10001 /tmp/router.toml /etc/claude-courier/router.toml
+sudo rm /tmp/router.toml
+```
+
+**2. nginx vhost for `router.example.com`** (terminates TLS, forwards to `127.0.0.1:3008`):
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name router.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/router.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/router.example.com/privkey.pem;
+
+    # SSE / streaming responses
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+
+    location / {
+        proxy_pass http://127.0.0.1:3008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+
+server {
+    listen 80;
+    server_name router.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+`certbot --nginx -d router.example.com` for the cert.
+
+Then trigger the **deploy router** GitHub Actions workflow (`workflow_dispatch` only — no automatic deploys on tag push). It pulls `:latest` (or a tag you specify), starts/replaces the `claude-courier-router` container, mounts `/etc/claude-courier/router.toml` read-only, and binds to `127.0.0.1:3008` on the host.
+
+To rotate keys after deploy: re-run `router-key add` / `revoke` locally → `scp` the new `router.toml` over → `ssh user@server "docker restart claude-courier-router"`. No image rebuild needed.
+
 ## Reverse proxy mode (bonus)
 
 ```sh
@@ -169,16 +269,18 @@ Features:
 
 ```
 src/
-  main.rs       # clap CLI: publish, consume, broker, proxy + their *-configure subcommands
-  config.rs     # PublisherConfig / BrokerConfig / ConsumerConfig / ProxyConfig + load/save/resolve
-  client.rs     # publish() and consume() — Keychain read, identity merge, atomic write
-  broker.rs     # hyper server, single-slot Mutex<Option<Bytes>>
-  proxy.rs      # hyper server, reqwest streaming passthrough
-  http.rs       # auth_get / auth_post_json helpers (used by client.rs)
-  log.rs        # timestamped eprintln
+  main.rs           # clap CLI: publish, consume, broker, router, proxy + their *-configure subcommands + router-key
+  config.rs         # PublisherConfig / BrokerConfig / ConsumerConfig / RouterConfig / ProxyConfig + load/save/resolve
+  client.rs         # publish() and consume() — Keychain read, identity merge, atomic write
+  broker.rs         # hyper server, single-slot Mutex<Option<Bytes>>
+  router.rs         # hyper server, multi-key auth, broker-fetched OAuth token cache, Bearer injection
+  proxy.rs          # hyper server, reqwest streaming passthrough
+  http.rs           # auth_get / auth_post_json helpers (used by client.rs and router.rs)
+  log.rs            # timestamped eprintln
 .github/workflows/
-  deploy.yml    # tag push -> build image, push to GHCR, SSH to server, roll container
-  release.yml   # tag push -> matrix-build 3 platforms, attach tarballs to GitHub Release
+  deploy.yml        # tag push -> build image, push to GHCR, SSH to server, roll broker container
+  deploy-router.yml # workflow_dispatch only -> roll router container with mounted router.toml
+  release.yml       # tag push -> matrix-build 3 platforms, attach tarballs to GitHub Release
 deploy/
   com.aishipbox.claude-courier-publish.plist  # macOS launchd agent for auto-republish
 install.sh      # POSIX-sh installer that picks the right release tarball

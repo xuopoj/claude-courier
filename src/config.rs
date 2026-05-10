@@ -32,6 +32,35 @@ pub struct ProxyConfig {
     pub listen_key: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RouterKey {
+    pub name: String,
+    pub key: String,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RouterConfig {
+    pub listen: String,
+    pub broker_url: String,
+    pub consume_key: String,
+    #[serde(default)]
+    pub keys: Vec<RouterKey>,
+    #[serde(default = "default_router_upstream")]
+    pub upstream: String,
+    #[serde(default = "default_expiry_buffer_secs")]
+    pub expiry_buffer_secs: u64,
+}
+
+fn default_router_upstream() -> String {
+    "https://api.anthropic.com".into()
+}
+
+fn default_expiry_buffer_secs() -> u64 {
+    300
+}
+
 fn config_dir() -> PathBuf {
     dirs::config_dir()
         .expect("no config dir")
@@ -49,6 +78,9 @@ pub fn consumer_path() -> PathBuf {
 }
 pub fn proxy_path() -> PathBuf {
     config_dir().join("proxy.toml")
+}
+pub fn router_path() -> PathBuf {
+    config_dir().join("router.toml")
 }
 
 fn write_secure(path: &PathBuf, contents: &str) -> Result<()> {
@@ -74,6 +106,9 @@ pub fn save_consumer(cfg: &ConsumerConfig) -> Result<()> {
 pub fn save_proxy(cfg: &ProxyConfig) -> Result<()> {
     write_secure(&proxy_path(), &toml::to_string_pretty(cfg)?)
 }
+pub fn save_router(cfg: &RouterConfig) -> Result<()> {
+    write_secure(&router_path(), &toml::to_string_pretty(cfg)?)
+}
 
 pub fn load_publisher() -> Result<PublisherConfig> {
     let p = publisher_path();
@@ -94,6 +129,11 @@ pub fn load_proxy() -> Result<ProxyConfig> {
     let p = proxy_path();
     let s = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
     toml::from_str(&s).context("parse proxy.toml")
+}
+pub fn load_router() -> Result<RouterConfig> {
+    let p = router_path();
+    let s = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+    toml::from_str(&s).context("parse router.toml")
 }
 
 pub fn resolve_publisher(
@@ -140,5 +180,33 @@ pub fn resolve_consumer(
         consume_key: consume_key
             .or_else(|| f.as_ref().map(|c| c.consume_key.clone()))
             .context("no consume_key: provide --key or run `consume-configure` first")?,
+    })
+}
+
+pub fn resolve_router(
+    listen: Option<String>,
+    broker_url: Option<String>,
+    consume_key: Option<String>,
+    upstream: Option<String>,
+) -> Result<RouterConfig> {
+    let f = load_router().ok();
+    Ok(RouterConfig {
+        listen: listen
+            .or_else(|| f.as_ref().map(|c| c.listen.clone()))
+            .unwrap_or_else(|| "127.0.0.1:8788".into()),
+        broker_url: broker_url
+            .or_else(|| f.as_ref().map(|c| c.broker_url.clone()))
+            .context("no broker_url: provide --broker or run `router-configure` first")?,
+        consume_key: consume_key
+            .or_else(|| f.as_ref().map(|c| c.consume_key.clone()))
+            .context("no consume_key: provide --consume-key or run `router-configure` first")?,
+        keys: f.as_ref().map(|c| c.keys.clone()).unwrap_or_default(),
+        upstream: upstream
+            .or_else(|| f.as_ref().map(|c| c.upstream.clone()))
+            .unwrap_or_else(default_router_upstream),
+        expiry_buffer_secs: f
+            .as_ref()
+            .map(|c| c.expiry_buffer_secs)
+            .unwrap_or_else(default_expiry_buffer_secs),
     })
 }
