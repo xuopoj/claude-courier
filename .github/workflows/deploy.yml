@@ -6,9 +6,15 @@
 #   SSH_USER            - SSH user (must be in the docker group)
 #   SSH_PRIVATE_KEY     - private key matching an authorized_keys entry on the server
 #   SSH_PORT            - (optional) SSH port; defaults to 22
-#   SSH_KNOWN_HOSTS     - output of `ssh-keyscan -H <host>` for the server, used to pin the host key
 #   BROKER_PUBLISH_KEY  - x-api-key the publisher must send
 #   BROKER_CONSUME_KEY  - x-api-key the consumer must send
+#
+# Host key handling: uses StrictHostKeyChecking=accept-new, so the runner
+# trusts whatever key the server presents on first connection and pins it
+# for the lifetime of that runner job (each runner is ephemeral, so this
+# means trust-on-first-use *every* deploy). Acceptable trade-off for a
+# personal-use broker; if you want full pinning, restore the SSH_KNOWN_HOSTS
+# secret and switch back to StrictHostKeyChecking=yes.
 #
 # GHCR push authenticates with the built-in GITHUB_TOKEN.
 
@@ -70,13 +76,14 @@ jobs:
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # known_hosts will be populated on first connection by
+          # StrictHostKeyChecking=accept-new in the next step.
+          touch ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Roll container on server
@@ -136,4 +143,4 @@ jobs:
           REMOTE
           } > "$script"
 
-          ssh -p "$PORT" -o StrictHostKeyChecking=yes "$SSH_USER@$SSH_HOST" 'bash -s' < "$script"
+          ssh -p "$PORT" -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" 'bash -s' < "$script"
