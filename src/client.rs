@@ -58,7 +58,7 @@ fn read_identity() -> Result<Value> {
 
 pub async fn publish(cfg: PublisherConfig) -> Result<()> {
     let credentials_raw = read_keychain_credentials()?;
-    let credentials: Value =
+    let mut credentials: Value =
         serde_json::from_str(&credentials_raw).context("Keychain payload is not valid JSON")?;
     let token_present = credentials
         .get("claudeAiOauth")
@@ -68,6 +68,16 @@ pub async fn publish(cfg: PublisherConfig) -> Result<()> {
         .unwrap_or(false);
     if !token_present {
         bail!("Keychain credentials missing claudeAiOauth.accessToken");
+    }
+
+    // Strip refreshToken before publishing — keeping the long-lived secret out
+    // of the broker's slot. Consumers will lose access when the access token
+    // expires until the publisher publishes again.
+    if let Some(oauth) = credentials
+        .get_mut("claudeAiOauth")
+        .and_then(|v| v.as_object_mut())
+    {
+        oauth.remove("refreshToken");
     }
 
     let identity = read_identity()?;
